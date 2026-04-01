@@ -204,8 +204,10 @@ def api_logs(name: str):
 # ---------------------------------------------------------------------------
 
 if __name__ == "__main__":
+    import os
+    port = int(os.environ.get("PORT", 9000))
     print("=" * 50)
     print("Tamil2Lyrics Dashboard")
-    print("Open: http://localhost:8080")
+    print(f"Open: http://localhost:{port}")
     print("=" * 50)
-    app.run(host="0.0.0.0", port=8080, debug=False, use_reloader=False)
+    app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False)
