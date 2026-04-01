@@ -1,3 +1,4 @@
 beautifulsoup4>=4.12
 lxml>=5.0
 tqdm>=4.66
+pymysql>=1.1
