@@ -494,42 +494,95 @@ def scrape_collection(
     print(f"{name.title()} complete: {len(done)} total")
 
 
-def enrich_songs_with_year():
-    """Post-process: add movie year to each song record."""
-    movies_file = OUTPUT_DIR / "movies.jsonl"
-    songs_file = OUTPUT_DIR / "songs.jsonl"
+def build_final_songs():
+    """
+    Join all scraped data into one fully connected songs_final.jsonl.
 
-    if not movies_file.exists() or not songs_file.exists():
-        print("Skipping enrichment — missing output files")
+    Each song record embeds:
+      - movie: { name, year, slug }
+      - lyricist: { name, slug }
+      - music_director: { name, slug }
+      - singer (string, as scraped)
+      - lyrics_en, lyrics_ta
+    """
+    songs_file = OUTPUT_DIR / "songs.jsonl"
+    movies_file = OUTPUT_DIR / "movies.jsonl"
+    lyricists_file = OUTPUT_DIR / "lyricists.jsonl"
+    music_dirs_file = OUTPUT_DIR / "music_directors.jsonl"
+
+    if not songs_file.exists():
+        print("Skipping final join — songs.jsonl missing")
         return
 
-    # Build movie_slug → year map
-    movie_years = {}
-    with open(movies_file, "r", encoding="utf-8") as f:
-        for line in f:
-            if line.strip():
-                m = json.loads(line)
-                if m.get("year"):
-                    movie_years[m["movie_slug"]] = m["year"]
+    def load_jsonl(path: Path) -> list[dict]:
+        if not path.exists():
+            return []
+        with open(path, "r", encoding="utf-8") as f:
+            return [json.loads(line) for line in f if line.strip()]
 
-    # Rewrite songs with year field
-    enriched_file = OUTPUT_DIR / "songs_enriched.jsonl"
-    enriched_count = 0
+    # Build lookup maps keyed by slug
+    movie_map = {m["movie_slug"]: m for m in load_jsonl(movies_file)}
+    lyricist_map = {l["slug"]: l for l in load_jsonl(lyricists_file)}
+    music_dir_map = {d["slug"]: d for d in load_jsonl(music_dirs_file)}
+
+    out_file = OUTPUT_DIR / "songs_final.jsonl"
+    joined = 0
+
     with open(songs_file, "r", encoding="utf-8") as fin, \
-         open(enriched_file, "w", encoding="utf-8") as fout:
+         open(out_file, "w", encoding="utf-8") as fout:
         for line in fin:
-            if line.strip():
-                song = json.loads(line)
-                slug = song.get("movie_slug", "")
-                song["year"] = movie_years.get(slug, "")
-                if song["year"]:
-                    enriched_count += 1
-                fout.write(json.dumps(song, ensure_ascii=False) + "\n")
+            if not line.strip():
+                continue
+            song = json.loads(line)
 
-    # Replace original with enriched
-    songs_file.unlink()
-    enriched_file.rename(songs_file)
-    print(f"Enrichment: {enriched_count} songs got year from movie data")
+            movie_slug = song.get("movie_slug", "")
+            lyricist_slug = song.get("lyricist_slug", "")
+
+            # Look up movie data
+            movie_rec = movie_map.get(movie_slug, {})
+            movie_obj = {
+                "name": song.get("movie", ""),
+                "slug": movie_slug,
+                "year": movie_rec.get("year", ""),
+            }
+
+            # Look up lyricist data
+            lyr_rec = lyricist_map.get(lyricist_slug, {})
+            lyricist_obj = {
+                "name": song.get("lyricist", ""),
+                "slug": lyricist_slug,
+            }
+
+            # Music director — match by name against music_director_map names
+            md_name = song.get("music_director", "")
+            md_slug = next(
+                (slug for slug, d in music_dir_map.items()
+                 if d.get("name", "").lower() == md_name.lower()),
+                ""
+            )
+            music_director_obj = {
+                "name": md_name,
+                "slug": md_slug,
+            }
+
+            record = {
+                "post_id": song.get("post_id"),
+                "url": song.get("url"),
+                "slug": song.get("slug"),
+                "title_en": song.get("title_en"),
+                "title_original": song.get("title_original"),
+                "singer": song.get("singer"),
+                "lyricist": lyricist_obj,
+                "music_director": music_director_obj,
+                "movie": movie_obj,
+                "lyrics_en": song.get("lyrics_en"),
+                "lyrics_ta": song.get("lyrics_ta"),
+                "related_songs": song.get("related_songs", []),
+            }
+            fout.write(json.dumps(record, ensure_ascii=False) + "\n")
+            joined += 1
+
+    print(f"Final join: {joined} songs written to {out_file.name}")
 
 
 def main():
@@ -575,16 +628,16 @@ def main():
     print("=" * 60)
     scrape_collection("music_directors", music_dir_urls, process_music_director, OUTPUT_DIR / "music_directors.jsonl")
 
-    # Phase 6: Enrich songs with movie year
+    # Phase 6: Join all data into fully connected song records
     print("\n" + "=" * 60)
-    print("Phase 6: Enriching songs with movie year")
+    print("Phase 6: Building final connected song records")
     print("=" * 60)
-    enrich_songs_with_year()
+    build_final_songs()
 
     # Summary
     counts = {}
     for name, fname in [
-        ("songs", "songs.jsonl"),
+        ("songs_final", "songs_final.jsonl"),
         ("movies", "movies.jsonl"),
         ("lyricists", "lyricists.jsonl"),
         ("music_directors", "music_directors.jsonl"),
