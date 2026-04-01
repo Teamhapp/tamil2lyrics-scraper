@@ -41,6 +41,8 @@ LYRICS_SITEMAPS = [
     f"{BASE_URL}/lyrics-sitemap5.xml",
 ]
 ALBUM_SITEMAP = f"{BASE_URL}/album-sitemap.xml"
+ARTIST_SITEMAP = f"{BASE_URL}/artist-sitemap.xml"
+MUSIC_DIR_SITEMAP = f"{BASE_URL}/music_director-sitemap.xml"
 
 WORKERS = 5
 DELAY_PER_WORKER = 1.5          # seconds between requests per worker
@@ -120,8 +122,8 @@ def fetch_sitemap_urls(sitemap_url: str) -> list[str]:
     return extract_urls_from_sitemap_xml(text)
 
 
-def collect_all_seed_urls() -> tuple[list[str], list[str]]:
-    """Fetch all lyrics + album sitemaps and return (song_urls, movie_urls)."""
+def collect_all_seed_urls() -> tuple[list[str], list[str], list[str], list[str]]:
+    """Fetch all sitemaps and return (song_urls, movie_urls, lyricist_urls, music_dir_urls)."""
     song_urls = []
     for sm_url in LYRICS_SITEMAPS:
         urls = fetch_sitemap_urls(sm_url)
@@ -131,7 +133,13 @@ def collect_all_seed_urls() -> tuple[list[str], list[str]]:
     movie_urls = fetch_sitemap_urls(ALBUM_SITEMAP)
     print(f"    → {len(movie_urls)} movie URLs")
 
-    return song_urls, movie_urls
+    lyricist_urls = fetch_sitemap_urls(ARTIST_SITEMAP)
+    print(f"    → {len(lyricist_urls)} lyricist URLs")
+
+    music_dir_urls = fetch_sitemap_urls(MUSIC_DIR_SITEMAP)
+    print(f"    → {len(music_dir_urls)} music director URLs")
+
+    return song_urls, movie_urls, lyricist_urls, music_dir_urls
 
 # ---------------------------------------------------------------------------
 # Song page parser
@@ -282,6 +290,76 @@ def parse_movie_page(html: str, url: str) -> dict:
     }
 
 # ---------------------------------------------------------------------------
+# Lyricist page parser
+# ---------------------------------------------------------------------------
+
+def parse_lyricist_page(html: str, url: str) -> dict:
+    soup = BeautifulSoup(html, "lxml")
+
+    slug = url.rstrip("/").split("/Lyricist/")[-1].strip("/")
+
+    # Name from <h1>
+    h1 = soup.find("h1")
+    name = h1.get_text(strip=True) if h1 else ""
+
+    # All song links on this page
+    songs = []
+    seen = set()
+    for a in soup.select('a[href*="/lyrics/"]'):
+        text = a.get_text(strip=True)
+        href = a.get("href", "")
+        s_slug = href.rstrip("/").split("/lyrics/")[-1].strip("/")
+        if s_slug and s_slug not in seen and text:
+            seen.add(s_slug)
+            songs.append({
+                "slug": s_slug,
+                "title": re.sub(r"\s*Song Lyrics\s*$", "", text, flags=re.I).strip(),
+            })
+
+    return {
+        "slug": slug,
+        "name": name,
+        "url": url,
+        "songs": songs,
+        "song_count": len(songs),
+    }
+
+
+# ---------------------------------------------------------------------------
+# Music director page parser
+# ---------------------------------------------------------------------------
+
+def parse_music_director_page(html: str, url: str) -> dict:
+    soup = BeautifulSoup(html, "lxml")
+
+    slug = url.rstrip("/").split("/music_director/")[-1].strip("/")
+
+    # Name from <title>: "Name | Tamil Song Lyrics - ..."
+    title_tag = soup.find("title")
+    name = title_tag.text.split("|")[0].strip() if title_tag else ""
+
+    # Movies listed as h3 > a[href*="/movies/"]
+    movies = []
+    seen = set()
+    for h3 in soup.find_all("h3"):
+        a = h3.find("a", href=re.compile(r"/movies/"))
+        if a:
+            m_slug = a["href"].rstrip("/").split("/movies/")[-1].strip("/")
+            m_name = a.get_text(strip=True)
+            if m_slug and m_slug not in seen:
+                seen.add(m_slug)
+                movies.append({"slug": m_slug, "name": m_name})
+
+    return {
+        "slug": slug,
+        "name": name,
+        "url": url,
+        "movies": movies,
+        "movie_count": len(movies),
+    }
+
+
+# ---------------------------------------------------------------------------
 # Checkpoint helpers
 # ---------------------------------------------------------------------------
 
@@ -331,6 +409,36 @@ def process_movie(url: str, output_file: Path) -> tuple[str, bool]:
         return url, False
     try:
         record = parse_movie_page(html, url)
+        append_jsonl(output_file, record)
+        return url, True
+    except Exception as e:
+        tqdm.write(f"Parse error {url}: {e}")
+        return url, False
+
+
+def process_lyricist(url: str, output_file: Path) -> tuple[str, bool]:
+    """Fetch and parse a single lyricist page. Returns (url, success)."""
+    time.sleep(DELAY_PER_WORKER)
+    html = curl_fetch(url)
+    if not html:
+        return url, False
+    try:
+        record = parse_lyricist_page(html, url)
+        append_jsonl(output_file, record)
+        return url, True
+    except Exception as e:
+        tqdm.write(f"Parse error {url}: {e}")
+        return url, False
+
+
+def process_music_director(url: str, output_file: Path) -> tuple[str, bool]:
+    """Fetch and parse a single music director page. Returns (url, success)."""
+    time.sleep(DELAY_PER_WORKER)
+    html = curl_fetch(url)
+    if not html:
+        return url, False
+    try:
+        record = parse_music_director_page(html, url)
         append_jsonl(output_file, record)
         return url, True
     except Exception as e:
@@ -433,8 +541,11 @@ def main():
     print("=" * 60)
     print("Phase 1: Fetching sitemaps")
     print("=" * 60)
-    song_urls, movie_urls = collect_all_seed_urls()
-    print(f"\nTotal: {len(song_urls)} song URLs, {len(movie_urls)} movie URLs")
+    song_urls, movie_urls, lyricist_urls, music_dir_urls = collect_all_seed_urls()
+    print(
+        f"\nTotal: {len(song_urls)} songs, {len(movie_urls)} movies, "
+        f"{len(lyricist_urls)} lyricists, {len(music_dir_urls)} music directors"
+    )
 
     if not song_urls:
         print("ERROR: No song URLs found. Check network connectivity.")
@@ -452,20 +563,39 @@ def main():
     print("=" * 60)
     scrape_collection("movies", movie_urls, process_movie, OUTPUT_DIR / "movies.jsonl")
 
-    # Phase 4: Enrich songs with movie year
+    # Phase 4: Scrape lyricists
     print("\n" + "=" * 60)
-    print("Phase 4: Enriching songs with movie year")
+    print("Phase 4: Scraping lyricist pages")
+    print("=" * 60)
+    scrape_collection("lyricists", lyricist_urls, process_lyricist, OUTPUT_DIR / "lyricists.jsonl")
+
+    # Phase 5: Scrape music directors
+    print("\n" + "=" * 60)
+    print("Phase 5: Scraping music director pages")
+    print("=" * 60)
+    scrape_collection("music_directors", music_dir_urls, process_music_director, OUTPUT_DIR / "music_directors.jsonl")
+
+    # Phase 6: Enrich songs with movie year
+    print("\n" + "=" * 60)
+    print("Phase 6: Enriching songs with movie year")
     print("=" * 60)
     enrich_songs_with_year()
 
     # Summary
-    songs_file = OUTPUT_DIR / "songs.jsonl"
-    movies_file = OUTPUT_DIR / "movies.jsonl"
-    song_count = sum(1 for _ in open(songs_file, encoding="utf-8")) if songs_file.exists() else 0
-    movie_count = sum(1 for _ in open(movies_file, encoding="utf-8")) if movies_file.exists() else 0
+    counts = {}
+    for name, fname in [
+        ("songs", "songs.jsonl"),
+        ("movies", "movies.jsonl"),
+        ("lyricists", "lyricists.jsonl"),
+        ("music_directors", "music_directors.jsonl"),
+    ]:
+        f = OUTPUT_DIR / fname
+        counts[name] = sum(1 for _ in open(f, encoding="utf-8")) if f.exists() else 0
 
     print("\n" + "=" * 60)
-    print(f"DONE! {song_count} songs, {movie_count} movies")
+    print(f"DONE!")
+    for name, count in counts.items():
+        print(f"  {name}: {count}")
     print(f"Output: {OUTPUT_DIR.resolve()}/")
     print("=" * 60)
 
