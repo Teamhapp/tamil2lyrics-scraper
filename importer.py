@@ -1,22 +1,23 @@
 """
 Tamil2Lyrics → WordPress Importer
 ==================================
-Imports scraped JSONL data directly into a WordPress MySQL database.
+Imports scraped JSONL data into a WordPress site using the
+tamil2lyrics custom theme (t2l_song, t2l_movie_post, t2l_person_post CPTs
+and t2l_movie, t2l_director, t2l_singer, t2l_lyricist, t2l_decade taxonomies).
 
-Edit the CONFIG section below before running.
-
-Usage:
+Edit the DB section below, then run:
     pip install pymysql tqdm
     python importer.py
 
 Import order:
-  1. Music directors  → wp_terms + wp_term_taxonomy
-  2. Movies           → wp_posts (CPT) + wp_postmeta
-  3. Lyricists        → wp_posts (CPT) + wp_postmeta
-  4. Songs            → wp_posts (CPT) + wp_postmeta (with linked IDs)
+  1. Taxonomy terms  → t2l_movie, t2l_director, t2l_singer, t2l_lyricist, t2l_decade
+  2. Movie posts     → t2l_movie_post  (linked to t2l_movie term via t2l_linked_tax_slug)
+  3. Person posts    → t2l_person_post (linked to their taxonomy terms)
+  4. Song posts      → t2l_song with all taxonomy relationships + postmeta
 """
 
 import json
+import re
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -25,64 +26,33 @@ import pymysql
 from tqdm import tqdm
 
 # ===========================================================================
-# CONFIG — edit everything in this section
+# CONFIG — edit DB credentials only, everything else matches the theme
 # ===========================================================================
 
 DB = {
-    "host":     "localhost",       # MySQL host
+    "host":     "localhost",
     "port":     3306,
-    "user":     "root",            # MySQL username
-    "password": "your_password",   # MySQL password
-    "database": "your_wp_db",      # WordPress database name
-    "prefix":   "wp_",             # WordPress table prefix (usually wp_)
+    "user":     "root",
+    "password": "your_password",    # ← change
+    "database": "your_wp_db",       # ← change
+    "prefix":   "wp_",              # ← change if different
     "charset":  "utf8mb4",
 }
 
-# WordPress post type slugs registered by your theme
-POST_TYPES = {
-    "song":       "lyrics",        # slug for song posts        e.g. "lyrics", "song"
-    "movie":      "album",         # slug for movie/album posts e.g. "album", "movie"
-    "lyricist":   "artist",        # slug for lyricist posts    e.g. "artist", "lyricist"
-}
-
-# Taxonomy slug for music directors (set "" to store as postmeta string only)
-MUSIC_DIRECTOR_TAXONOMY = "music_director"  # e.g. "music_director", "composer", ""
-
-# WordPress user ID to assign as post author (usually 1 for admin)
-AUTHOR_ID = 1
-
-# Post status for all imported posts: "publish", "draft", "private"
+AUTHOR_ID   = 1           # WordPress user ID to own imported posts
 POST_STATUS = "publish"
 
-# Postmeta keys — how your theme reads data from each song post
-SONG_META_KEYS = {
-    "singer":           "singers",          # singer name(s) string
-    "lyrics_en":        "lyrics_english",   # English lyrics (also stored in post_content)
-    "lyrics_ta":        "lyrics_tamil",     # Tamil lyrics
-    "movie_post_id":    "movie_id",         # wp post ID of the related movie post
-    "lyricist_post_id": "lyricist_id",      # wp post ID of the related lyricist post
-    "music_director":   "music_director",   # music director name string (always stored)
-    "year":             "year",             # release year
-}
-
-MOVIE_META_KEYS = {
-    "year":             "year",
-}
-
-# What goes in post_content for songs? "lyrics_en", "lyrics_ta", or "" for empty
-SONG_POST_CONTENT = "lyrics_en"
-
-# Input files (output from scraper.py)
-OUTPUT_DIR = Path("output")
-SONGS_FILE      = OUTPUT_DIR / "songs_final.jsonl"   # fully joined records
+# Input files
+OUTPUT_DIR      = Path("output")
+SONGS_FILE      = OUTPUT_DIR / "songs_final.jsonl"
 MOVIES_FILE     = OUTPUT_DIR / "movies.jsonl"
 LYRICISTS_FILE  = OUTPUT_DIR / "lyricists.jsonl"
+MUSIC_DIRS_FILE = OUTPUT_DIR / "music_directors.jsonl"
 
-# Batch size for bulk inserts
-BATCH = 200
+BATCH = 500   # flush to DB every N rows
 
 # ===========================================================================
-# Helpers
+# DB helpers
 # ===========================================================================
 
 NOW = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -90,142 +60,202 @@ NOW = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
 def load_jsonl(path: Path) -> list[dict]:
     if not path.exists():
-        print(f"  WARNING: {path} not found, skipping")
+        print(f"  WARNING: {path} not found")
         return []
     with open(path, encoding="utf-8") as f:
-        return [json.loads(line) for line in f if line.strip()]
-
-
-def table(name: str) -> str:
-    return f"{DB['prefix']}{name}"
+        return [json.loads(l) for l in f if l.strip()]
 
 
 def get_conn() -> pymysql.Connection:
     return pymysql.connect(
-        host=DB["host"],
-        port=DB["port"],
-        user=DB["user"],
-        password=DB["password"],
-        database=DB["database"],
-        charset=DB["charset"],
+        host=DB["host"], port=DB["port"],
+        user=DB["user"], password=DB["password"],
+        database=DB["database"], charset=DB["charset"],
         autocommit=False,
     )
 
 
-def slug_exists(cur, post_type: str, slug: str) -> int | None:
-    """Return existing post ID if slug already imported, else None."""
+def T(name: str) -> str:
+    return f"{DB['prefix']}{name}"
+
+
+def make_unique_slug(cur, base_slug: str) -> str:
+    """Ensure slug is unique in wp_posts."""
+    slug = base_slug
+    n = 1
+    while True:
+        cur.execute(f"SELECT ID FROM {T('posts')} WHERE post_name=%s LIMIT 1", (slug,))
+        if not cur.fetchone():
+            return slug
+        slug = f"{base_slug}-{n}"
+        n += 1
+
+
+def make_unique_term_slug(cur, base_slug: str) -> str:
+    """Ensure slug is unique in wp_terms."""
+    slug = base_slug
+    n = 1
+    while True:
+        cur.execute(f"SELECT term_id FROM {T('terms')} WHERE slug=%s LIMIT 1", (slug,))
+        if not cur.fetchone():
+            return slug
+        slug = f"{base_slug}-{n}"
+        n += 1
+
+
+def insert_post(cur, title: str, slug: str, post_type: str, content: str = "") -> int:
+    slug = make_unique_slug(cur, slug)
     cur.execute(
-        f"SELECT ID FROM {table('posts')} WHERE post_type=%s AND post_name=%s LIMIT 1",
+        f"""INSERT INTO {T('posts')}
+            (post_author, post_date, post_date_gmt, post_content, post_title,
+             post_status, post_name, post_type, post_modified, post_modified_gmt,
+             to_ping, pinged, post_content_filtered, guid, comment_status, ping_status)
+            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'','','','','closed','closed')""",
+        (AUTHOR_ID, NOW, NOW, content, title, POST_STATUS, slug, post_type, NOW, NOW),
+    )
+    post_id = cur.lastrowid
+    cur.execute(f"UPDATE {T('posts')} SET guid=%s WHERE ID=%s", (f"?p={post_id}", post_id))
+    return post_id
+
+
+def post_exists(cur, post_type: str, slug: str) -> int | None:
+    cur.execute(
+        f"SELECT ID FROM {T('posts')} WHERE post_type=%s AND post_name=%s LIMIT 1",
         (post_type, slug),
     )
     row = cur.fetchone()
     return row[0] if row else None
 
 
-def insert_post(cur, title: str, slug: str, post_type: str, content: str = "") -> int:
-    """Insert a wp_posts row and return its ID."""
-    cur.execute(
-        f"""INSERT INTO {table('posts')}
-            (post_author, post_date, post_date_gmt, post_content, post_title,
-             post_status, post_name, post_type, post_modified, post_modified_gmt,
-             to_ping, pinged, post_content_filtered, guid, comment_status, ping_status)
-            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,'','','','','closed','closed')""",
-        (AUTHOR_ID, NOW, NOW, content, title,
-         POST_STATUS, slug, post_type, NOW, NOW),
-    )
-    post_id = cur.lastrowid
-    # Update guid with placeholder (theme can update later)
-    cur.execute(
-        f"UPDATE {table('posts')} SET guid=%s WHERE ID=%s",
-        (f"?p={post_id}", post_id),
-    )
-    return post_id
-
-
-def insert_postmeta_bulk(cur, rows: list[tuple]):
-    """Bulk insert postmeta rows: [(post_id, meta_key, meta_value), ...]"""
-    if not rows:
-        return
-    cur.executemany(
-        f"INSERT INTO {table('postmeta')} (post_id, meta_key, meta_value) VALUES (%s,%s,%s)",
-        rows,
-    )
-
-
 # ===========================================================================
-# Phase 1 — Music directors as taxonomy terms
+# Phase 1 — Taxonomy terms
 # ===========================================================================
 
-def import_music_directors(songs: list[dict]) -> dict[str, int]:
+def get_or_create_term(cur, name: str, slug: str, taxonomy: str) -> int:
     """
-    Create taxonomy terms for each unique music director name.
-    Returns { name_lower: term_taxonomy_id }.
+    Return term_taxonomy_id for an existing or newly created term.
+    Checks by slug within taxonomy.
     """
-    if not MUSIC_DIRECTOR_TAXONOMY:
-        return {}
+    cur.execute(
+        f"""SELECT tt.term_taxonomy_id FROM {T('terms')} t
+            JOIN {T('term_taxonomy')} tt ON t.term_id = tt.term_id
+            WHERE tt.taxonomy=%s AND t.slug=%s LIMIT 1""",
+        (taxonomy, slug),
+    )
+    row = cur.fetchone()
+    if row:
+        return row[0]
 
-    # Collect unique director names from songs
-    directors = {}
+    slug = make_unique_term_slug(cur, slug)
+    cur.execute(f"INSERT INTO {T('terms')} (name, slug, term_group) VALUES (%s,%s,0)", (name, slug))
+    term_id = cur.lastrowid
+    cur.execute(
+        f"INSERT INTO {T('term_taxonomy')} (term_id, taxonomy, description, parent, count) VALUES (%s,%s,'',0,0)",
+        (term_id, taxonomy),
+    )
+    return cur.lastrowid
+
+
+def slugify(text: str) -> str:
+    text = text.lower().strip()
+    text = re.sub(r"[^\w\s-]", "", text)
+    text = re.sub(r"[\s_]+", "-", text)
+    text = re.sub(r"-+", "-", text).strip("-")
+    return text
+
+
+def parse_singers(singer_str: str) -> list[str]:
+    """Split 'A & B, C' into individual singer names."""
+    if not singer_str:
+        return []
+    parts = re.split(r"[,&]", singer_str)
+    return [p.strip() for p in parts if p.strip()]
+
+
+def import_all_terms(songs: list[dict], movies: list[dict], music_dirs: list[dict]) -> dict:
+    """
+    Build all taxonomy terms upfront.
+    Returns:
+      {
+        't2l_movie':    { movie_slug: tt_id },
+        't2l_director': { director_slug: tt_id },
+        't2l_singer':   { singer_slug: tt_id },
+        't2l_lyricist': { lyricist_slug: tt_id },
+        't2l_decade':   { '1990s': tt_id, ... },
+      }
+    """
+    print("Building taxonomy term maps...")
+
+    # Collect unique entities
+    movie_terms    = {}   # slug → name
+    director_terms = {}
+    singer_terms   = {}
+    lyricist_terms = {}
+    decade_terms   = set()
+
     for song in songs:
-        md = song.get("music_director", {})
-        name = md.get("name", "").strip() if isinstance(md, dict) else str(md).strip()
-        slug = md.get("slug", "").strip() if isinstance(md, dict) else ""
-        if name and name not in directors:
-            directors[name] = slug or name.lower().replace(" ", "-")
+        movie = song.get("movie", {})
+        m_slug = movie.get("slug", "")
+        m_name = movie.get("name", "")
+        if m_slug and m_name:
+            movie_terms[m_slug] = m_name
 
-    print(f"Music directors: {len(directors)} unique names")
-    if not directors:
-        return {}
+        year = movie.get("year", "")
+        if year and year.isdigit():
+            decade_terms.add(f"{(int(year)//10)*10}s")
+
+        md = song.get("music_director", {})
+        d_slug = md.get("slug", "") if isinstance(md, dict) else ""
+        d_name = md.get("name", "") if isinstance(md, dict) else str(md)
+        if d_slug and d_name:
+            director_terms[d_slug] = d_name
+        elif d_name:
+            director_terms[slugify(d_name)] = d_name
+
+        lyr = song.get("lyricist", {})
+        l_slug = lyr.get("slug", "") if isinstance(lyr, dict) else ""
+        l_name = lyr.get("name", "") if isinstance(lyr, dict) else str(lyr)
+        if l_slug and l_name:
+            lyricist_terms[l_slug] = l_name
+        elif l_name:
+            lyricist_terms[slugify(l_name)] = l_name
+
+        for singer_name in parse_singers(song.get("singer", "")):
+            s_slug = slugify(singer_name)
+            if s_slug:
+                singer_terms[s_slug] = singer_name
+
+    # Supplement movie terms from movies.jsonl
+    for m in movies:
+        slug = m.get("movie_slug", "")
+        name = m.get("name", "")
+        if slug and name:
+            movie_terms.setdefault(slug, name)
+
+    print(f"  movies: {len(movie_terms)}, directors: {len(director_terms)}, "
+          f"singers: {len(singer_terms)}, lyricists: {len(lyricist_terms)}, "
+          f"decades: {len(decade_terms)}")
 
     conn = get_conn()
     cur = conn.cursor()
-    name_to_tt_id: dict[str, int] = {}
+    result = {t: {} for t in ["t2l_movie", "t2l_director", "t2l_singer", "t2l_lyricist", "t2l_decade"]}
 
     try:
-        # Check which already exist
-        cur.execute(
-            f"SELECT t.name, tt.term_taxonomy_id FROM {table('terms')} t "
-            f"JOIN {table('term_taxonomy')} tt ON t.term_id=tt.term_id "
-            f"WHERE tt.taxonomy=%s",
-            (MUSIC_DIRECTOR_TAXONOMY,),
-        )
-        for row in cur.fetchall():
-            name_to_tt_id[row[0].lower()] = row[1]
+        for taxonomy, terms in [
+            ("t2l_movie",    movie_terms),
+            ("t2l_director", director_terms),
+            ("t2l_singer",   singer_terms),
+            ("t2l_lyricist", lyricist_terms),
+        ]:
+            for slug, name in tqdm(terms.items(), desc=taxonomy, unit="term"):
+                tt_id = get_or_create_term(cur, name, slug, taxonomy)
+                result[taxonomy][slug] = tt_id
 
-        new_count = 0
-        for name, slug in tqdm(directors.items(), desc="Music directors", unit="term"):
-            if name.lower() in name_to_tt_id:
-                continue
-
-            # Ensure unique slug
-            base_slug = slug
-            suffix = 1
-            while True:
-                cur.execute(
-                    f"SELECT term_id FROM {table('terms')} WHERE slug=%s LIMIT 1",
-                    (slug,)
-                )
-                if not cur.fetchone():
-                    break
-                slug = f"{base_slug}-{suffix}"
-                suffix += 1
-
-            cur.execute(
-                f"INSERT INTO {table('terms')} (name, slug, term_group) VALUES (%s,%s,0)",
-                (name, slug),
-            )
-            term_id = cur.lastrowid
-            cur.execute(
-                f"INSERT INTO {table('term_taxonomy')} (term_id, taxonomy, description, parent, count) "
-                f"VALUES (%s,%s,'',0,0)",
-                (term_id, MUSIC_DIRECTOR_TAXONOMY),
-            )
-            tt_id = cur.lastrowid
-            name_to_tt_id[name.lower()] = tt_id
-            new_count += 1
+        for decade in tqdm(decade_terms, desc="t2l_decade", unit="term"):
+            tt_id = get_or_create_term(cur, decade, slugify(decade), "t2l_decade")
+            result["t2l_decade"][decade] = tt_id
 
         conn.commit()
-        print(f"  → {new_count} new terms created, {len(name_to_tt_id)} total")
     except Exception as e:
         conn.rollback()
         print(f"  ERROR: {e}")
@@ -234,57 +264,63 @@ def import_music_directors(songs: list[dict]) -> dict[str, int]:
         cur.close()
         conn.close()
 
-    return name_to_tt_id
+    print("  Taxonomy terms done.")
+    return result
 
 
 # ===========================================================================
-# Phase 2 — Movies
+# Phase 2 — Movie posts (t2l_movie_post)
+# Linked to t2l_movie taxonomy via t2l_linked_tax_slug postmeta
 # ===========================================================================
 
-def import_movies(movies: list[dict]) -> dict[str, int]:
-    """Import movie posts. Returns { movie_slug: post_id }."""
-    print(f"Movies: {len(movies)} records")
-    if not movies:
-        return {}
-
+def import_movie_posts(movies: list[dict], movie_tt_ids: dict) -> dict[str, int]:
+    """Returns { movie_slug: post_id }"""
+    print(f"\nMovies: {len(movies)}")
     conn = get_conn()
     cur = conn.cursor()
     slug_to_id: dict[str, int] = {}
-    skipped = 0
-    new_count = 0
+    new_count = skipped = 0
     meta_rows: list[tuple] = []
 
     try:
-        pbar = tqdm(movies, desc="Movies", unit="post")
-        for m in pbar:
-            slug = m.get("movie_slug", "").strip()
-            name = m.get("name", "").strip() or slug
-            year = m.get("year", "")
+        for m in tqdm(movies, desc="Movie posts", unit="post"):
+            slug       = m.get("movie_slug", "").strip()
+            name       = m.get("name", "").strip() or slug
+            year       = m.get("year", "")
             if not slug:
                 continue
 
-            existing = slug_exists(cur, POST_TYPES["movie"], slug)
+            existing = post_exists(cur, "t2l_movie_post", slug)
             if existing:
                 slug_to_id[slug] = existing
                 skipped += 1
                 continue
 
-            post_id = insert_post(cur, name, slug, POST_TYPES["movie"])
+            post_id = insert_post(cur, name, slug, "t2l_movie_post")
             slug_to_id[slug] = post_id
             new_count += 1
 
-            if year:
-                meta_rows.append((post_id, MOVIE_META_KEYS["year"], year))
+            meta_rows += [
+                (post_id, "t2l_linked_tax_slug", slug),     # link to taxonomy term
+                (post_id, "t2l_film_year",        year or ""),
+                (post_id, "t2l_song_count",       str(len(m.get("songs", [])))),
+            ]
 
             if len(meta_rows) >= BATCH:
-                insert_postmeta_bulk(cur, meta_rows)
+                cur.executemany(
+                    f"INSERT INTO {T('postmeta')} (post_id,meta_key,meta_value) VALUES (%s,%s,%s)",
+                    meta_rows,
+                )
                 meta_rows.clear()
                 conn.commit()
 
         if meta_rows:
-            insert_postmeta_bulk(cur, meta_rows)
+            cur.executemany(
+                f"INSERT INTO {T('postmeta')} (post_id,meta_key,meta_value) VALUES (%s,%s,%s)",
+                meta_rows,
+            )
         conn.commit()
-        print(f"  → {new_count} new, {skipped} skipped (already exist)")
+        print(f"  → {new_count} new, {skipped} skipped")
     except Exception as e:
         conn.rollback()
         print(f"  ERROR: {e}")
@@ -297,44 +333,114 @@ def import_movies(movies: list[dict]) -> dict[str, int]:
 
 
 # ===========================================================================
-# Phase 3 — Lyricists
+# Phase 3 — Person posts (t2l_person_post)
+# One post per unique person (can be director + lyricist + singer combined)
 # ===========================================================================
 
-def import_lyricists(lyricists: list[dict]) -> dict[str, int]:
-    """Import lyricist posts. Returns { lyricist_slug: post_id }."""
-    print(f"Lyricists: {len(lyricists)} records")
-    if not lyricists:
-        return {}
+def import_person_posts(
+    lyricists: list[dict],
+    music_dirs: list[dict],
+    songs: list[dict],
+    term_maps: dict,
+) -> dict[str, int]:
+    """
+    Create one t2l_person_post per unique person (merged by slug).
+    Returns { person_slug: post_id }
+    """
+    # Build a unified person registry
+    # slug → { name, roles: set, dir_slug, singer_slug, lyricist_slug }
+    people: dict[str, dict] = {}
+
+    for lyr in lyricists:
+        slug = lyr.get("slug", "").strip()
+        name = lyr.get("name", "").strip()
+        if not slug:
+            continue
+        p = people.setdefault(slug, {"name": name, "roles": set()})
+        p["roles"].add("lyricist")
+        p["lyricist_slug"] = slug
+
+    for md in music_dirs:
+        slug = md.get("slug", "").strip()
+        name = md.get("name", "").strip()
+        if not slug:
+            continue
+        p = people.setdefault(slug, {"name": name, "roles": set()})
+        p["roles"].add("director")
+        p["dir_slug"] = slug
+
+    # Also add singers found in songs
+    for song in songs:
+        for sname in parse_singers(song.get("singer", "")):
+            s_slug = slugify(sname)
+            if not s_slug:
+                continue
+            p = people.setdefault(s_slug, {"name": sname, "roles": set()})
+            p["roles"].add("singer")
+            p["singer_slug"] = s_slug
+
+    print(f"\nPeople: {len(people)} unique persons")
 
     conn = get_conn()
     cur = conn.cursor()
     slug_to_id: dict[str, int] = {}
-    skipped = 0
-    new_count = 0
+    new_count = skipped = 0
+    meta_rows: list[tuple] = []
 
     try:
-        pbar = tqdm(lyricists, desc="Lyricists", unit="post")
-        for lyr in pbar:
-            slug = lyr.get("slug", "").strip()
-            name = lyr.get("name", "").strip() or slug
-            if not slug:
-                continue
+        for slug, info in tqdm(people.items(), desc="Person posts", unit="post"):
+            name  = info["name"]
+            roles = info["roles"]
 
-            existing = slug_exists(cur, POST_TYPES["lyricist"], slug)
+            existing = post_exists(cur, "t2l_person_post", slug)
             if existing:
                 slug_to_id[slug] = existing
                 skipped += 1
                 continue
 
-            post_id = insert_post(cur, name, slug, POST_TYPES["lyricist"])
+            post_id = insert_post(cur, name, slug, "t2l_person_post")
             slug_to_id[slug] = post_id
             new_count += 1
 
-            if new_count % BATCH == 0:
+            meta_rows += [
+                (post_id, "t2l_person_type", ",".join(sorted(roles))),
+            ]
+            if "dir_slug" in info:
+                meta_rows.append((post_id, "t2l_linked_dir_slug", info["dir_slug"]))
+            if "lyricist_slug" in info:
+                meta_rows.append((post_id, "t2l_linked_lyricist_slug", info["lyricist_slug"]))
+            if "singer_slug" in info:
+                meta_rows.append((post_id, "t2l_linked_singer_slug", info["singer_slug"]))
+
+            # Assign taxonomy terms to this person post
+            term_rel_rows = []
+            if "director" in roles and slug in term_maps["t2l_director"]:
+                term_rel_rows.append((post_id, term_maps["t2l_director"][slug], 0))
+            if "lyricist" in roles and slug in term_maps["t2l_lyricist"]:
+                term_rel_rows.append((post_id, term_maps["t2l_lyricist"][slug], 0))
+            if "singer" in roles and slug in term_maps["t2l_singer"]:
+                term_rel_rows.append((post_id, term_maps["t2l_singer"][slug], 0))
+            if term_rel_rows:
+                cur.executemany(
+                    f"INSERT IGNORE INTO {T('term_relationships')} (object_id,term_taxonomy_id,term_order) VALUES (%s,%s,%s)",
+                    term_rel_rows,
+                )
+
+            if len(meta_rows) >= BATCH:
+                cur.executemany(
+                    f"INSERT INTO {T('postmeta')} (post_id,meta_key,meta_value) VALUES (%s,%s,%s)",
+                    meta_rows,
+                )
+                meta_rows.clear()
                 conn.commit()
 
+        if meta_rows:
+            cur.executemany(
+                f"INSERT INTO {T('postmeta')} (post_id,meta_key,meta_value) VALUES (%s,%s,%s)",
+                meta_rows,
+            )
         conn.commit()
-        print(f"  → {new_count} new, {skipped} skipped (already exist)")
+        print(f"  → {new_count} new, {skipped} skipped")
     except Exception as e:
         conn.rollback()
         print(f"  ERROR: {e}")
@@ -347,121 +453,118 @@ def import_lyricists(lyricists: list[dict]) -> dict[str, int]:
 
 
 # ===========================================================================
-# Phase 4 — Songs
+# Phase 4 — Song posts (t2l_song)
 # ===========================================================================
 
-def import_songs(
-    songs: list[dict],
-    movie_slug_to_id: dict[str, int],
-    lyricist_slug_to_id: dict[str, int],
-    md_name_to_tt_id: dict[str, int],
-):
-    """Import song posts with all linked metadata."""
-    print(f"Songs: {len(songs)} records")
-    if not songs:
-        return
-
+def import_songs(songs: list[dict], term_maps: dict):
+    print(f"\nSongs: {len(songs)}")
     conn = get_conn()
     cur = conn.cursor()
-    skipped = 0
-    new_count = 0
+    new_count = skipped = 0
     meta_rows: list[tuple] = []
     term_rel_rows: list[tuple] = []
 
     try:
-        pbar = tqdm(songs, desc="Songs", unit="post")
-        for song in pbar:
-            slug = song.get("slug", "").strip()
-            title = song.get("title_en", "").strip() or slug
+        for song in tqdm(songs, desc="Songs", unit="post"):
+            slug      = song.get("slug", "").strip()
+            title     = song.get("title_en", "").strip() or slug
+            lyrics_en = song.get("lyrics_en", "")
+            lyrics_ta = song.get("lyrics_ta", "")
+            singer    = song.get("singer", "")
+
+            movie     = song.get("movie", {})
+            m_slug    = movie.get("slug", "") if isinstance(movie, dict) else ""
+            year      = movie.get("year", "") if isinstance(movie, dict) else ""
+
+            lyr       = song.get("lyricist", {})
+            l_slug    = lyr.get("slug", "") if isinstance(lyr, dict) else ""
+
+            md        = song.get("music_director", {})
+            d_slug    = md.get("slug", "") if isinstance(md, dict) else slugify(str(md))
+
             if not slug:
                 continue
 
-            existing = slug_exists(cur, POST_TYPES["song"], slug)
+            existing = post_exists(cur, "t2l_song", slug)
             if existing:
                 skipped += 1
                 continue
 
-            # Post content
-            content = ""
-            if SONG_POST_CONTENT == "lyrics_en":
-                content = song.get("lyrics_en", "")
-            elif SONG_POST_CONTENT == "lyrics_ta":
-                content = song.get("lyrics_ta", "")
-
-            post_id = insert_post(cur, title, slug, POST_TYPES["song"], content)
+            # post_content = English lyrics (theme reads this via the_content())
+            post_id = insert_post(cur, title, slug, "t2l_song", lyrics_en)
             new_count += 1
 
-            # Resolve related IDs
-            movie_obj = song.get("movie", {})
-            movie_slug = movie_obj.get("slug", "") if isinstance(movie_obj, dict) else ""
-            movie_post_id = movie_slug_to_id.get(movie_slug, "")
-
-            lyr_obj = song.get("lyricist", {})
-            lyr_slug = lyr_obj.get("slug", "") if isinstance(lyr_obj, dict) else ""
-            lyr_name = lyr_obj.get("name", "") if isinstance(lyr_obj, dict) else ""
-            lyr_post_id = lyricist_slug_to_id.get(lyr_slug, "")
-
-            md_obj = song.get("music_director", {})
-            md_name = md_obj.get("name", "") if isinstance(md_obj, dict) else str(md_obj)
-
-            year = movie_obj.get("year", "") if isinstance(movie_obj, dict) else ""
-
             # Postmeta
+            decade = f"{(int(year)//10)*10}s" if year and year.isdigit() else ""
             meta_rows += [
-                (post_id, SONG_META_KEYS["singer"],           song.get("singer", "")),
-                (post_id, SONG_META_KEYS["lyrics_en"],        song.get("lyrics_en", "")),
-                (post_id, SONG_META_KEYS["lyrics_ta"],        song.get("lyrics_ta", "")),
-                (post_id, SONG_META_KEYS["music_director"],   md_name),
-                (post_id, SONG_META_KEYS["year"],             year),
+                (post_id, "t2l_lyrics_english", lyrics_en),
+                (post_id, "t2l_lyrics_tamil",   lyrics_ta),
+                (post_id, "t2l_movie_year",     year or ""),
             ]
-            if movie_post_id:
-                meta_rows.append((post_id, SONG_META_KEYS["movie_post_id"], str(movie_post_id)))
-            if lyr_post_id:
-                meta_rows.append((post_id, SONG_META_KEYS["lyricist_post_id"], str(lyr_post_id)))
+            if song.get("title_original"):
+                meta_rows.append((post_id, "t2l_title_tamil", song["title_original"]))
 
-            # Music director taxonomy relationship
-            if MUSIC_DIRECTOR_TAXONOMY and md_name:
-                tt_id = md_name_to_tt_id.get(md_name.lower())
-                if tt_id:
-                    term_rel_rows.append((post_id, tt_id, 0))
+            # Taxonomy relationships
+            for taxonomy, term_slug in [
+                ("t2l_movie",    m_slug),
+                ("t2l_director", d_slug),
+                ("t2l_lyricist", l_slug),
+            ]:
+                if term_slug and term_slug in term_maps[taxonomy]:
+                    term_rel_rows.append((post_id, term_maps[taxonomy][term_slug], 0))
 
-            if len(meta_rows) >= BATCH * 10:
-                insert_postmeta_bulk(cur, meta_rows)
+            # Singer — can be multiple
+            for sname in parse_singers(singer):
+                s_slug = slugify(sname)
+                if s_slug and s_slug in term_maps["t2l_singer"]:
+                    term_rel_rows.append((post_id, term_maps["t2l_singer"][s_slug], 0))
+
+            # Decade
+            if decade and decade in term_maps["t2l_decade"]:
+                term_rel_rows.append((post_id, term_maps["t2l_decade"][decade], 0))
+
+            # Flush in batches
+            if len(meta_rows) >= BATCH * 5:
+                cur.executemany(
+                    f"INSERT INTO {T('postmeta')} (post_id,meta_key,meta_value) VALUES (%s,%s,%s)",
+                    meta_rows,
+                )
                 meta_rows.clear()
                 if term_rel_rows:
                     cur.executemany(
-                        f"INSERT IGNORE INTO {table('term_relationships')} "
-                        f"(object_id, term_taxonomy_id, term_order) VALUES (%s,%s,%s)",
+                        f"INSERT IGNORE INTO {T('term_relationships')} (object_id,term_taxonomy_id,term_order) VALUES (%s,%s,%s)",
                         term_rel_rows,
                     )
                     term_rel_rows.clear()
                 conn.commit()
 
-        # Flush remainder
+        # Final flush
         if meta_rows:
-            insert_postmeta_bulk(cur, meta_rows)
+            cur.executemany(
+                f"INSERT INTO {T('postmeta')} (post_id,meta_key,meta_value) VALUES (%s,%s,%s)",
+                meta_rows,
+            )
         if term_rel_rows:
             cur.executemany(
-                f"INSERT IGNORE INTO {table('term_relationships')} "
-                f"(object_id, term_taxonomy_id, term_order) VALUES (%s,%s,%s)",
+                f"INSERT IGNORE INTO {T('term_relationships')} (object_id,term_taxonomy_id,term_order) VALUES (%s,%s,%s)",
                 term_rel_rows,
             )
         conn.commit()
 
-        # Update term counts
-        if MUSIC_DIRECTOR_TAXONOMY:
+        # Update term counts for all taxonomies
+        for taxonomy in ["t2l_movie", "t2l_director", "t2l_singer", "t2l_lyricist", "t2l_decade"]:
             cur.execute(
-                f"""UPDATE {table('term_taxonomy')} tt
+                f"""UPDATE {T('term_taxonomy')} tt
                     SET count = (
-                        SELECT COUNT(*) FROM {table('term_relationships')} tr
+                        SELECT COUNT(*) FROM {T('term_relationships')} tr
                         WHERE tr.term_taxonomy_id = tt.term_taxonomy_id
                     )
                     WHERE tt.taxonomy = %s""",
-                (MUSIC_DIRECTOR_TAXONOMY,),
+                (taxonomy,),
             )
-            conn.commit()
+        conn.commit()
 
-        print(f"  → {new_count} new, {skipped} skipped (already exist)")
+        print(f"  → {new_count} new, {skipped} skipped")
     except Exception as e:
         conn.rollback()
         print(f"  ERROR: {e}")
@@ -477,27 +580,26 @@ def import_songs(
 
 def main():
     print("=" * 60)
-    print("Tamil2Lyrics → WordPress Importer")
+    print("Tamil2Lyrics Theme Importer")
     print("=" * 60)
 
-    # Validate config
     if DB["password"] == "your_password" or DB["database"] == "your_wp_db":
-        print("ERROR: Edit the DB config at the top of this file before running.")
+        print("ERROR: Set your DB credentials at the top of this file.")
         sys.exit(1)
 
-    # Load data
     print("\nLoading scraped data...")
     songs     = load_jsonl(SONGS_FILE)
     movies    = load_jsonl(MOVIES_FILE)
     lyricists = load_jsonl(LYRICISTS_FILE)
-    print(f"  {len(songs)} songs, {len(movies)} movies, {len(lyricists)} lyricists")
+    music_dirs = load_jsonl(MUSIC_DIRS_FILE)
+    print(f"  {len(songs)} songs, {len(movies)} movies, "
+          f"{len(lyricists)} lyricists, {len(music_dirs)} music directors")
 
     if not songs:
         print("ERROR: No songs found. Run scraper.py first.")
         sys.exit(1)
 
-    # Test DB connection
-    print("\nTesting database connection...")
+    print("\nTesting DB connection...")
     try:
         conn = get_conn()
         conn.ping()
@@ -507,32 +609,35 @@ def main():
         print(f"  FAILED: {e}")
         sys.exit(1)
 
-    # Phase 1: Music director terms
+    # Phase 1 — All taxonomy terms
     print("\n" + "=" * 60)
-    print("Phase 1: Music directors (taxonomy terms)")
+    print("Phase 1: Taxonomy terms")
     print("=" * 60)
-    md_name_to_tt_id = import_music_directors(songs)
+    term_maps = import_all_terms(songs, movies, music_dirs)
 
-    # Phase 2: Movies
+    # Phase 2 — Movie posts
     print("\n" + "=" * 60)
-    print("Phase 2: Movies")
+    print("Phase 2: Movie posts (t2l_movie_post)")
     print("=" * 60)
-    movie_slug_to_id = import_movies(movies)
+    import_movie_posts(movies, term_maps["t2l_movie"])
 
-    # Phase 3: Lyricists
+    # Phase 3 — Person posts
     print("\n" + "=" * 60)
-    print("Phase 3: Lyricists")
+    print("Phase 3: Person posts (t2l_person_post)")
     print("=" * 60)
-    lyricist_slug_to_id = import_lyricists(lyricists)
+    import_person_posts(lyricists, music_dirs, songs, term_maps)
 
-    # Phase 4: Songs
+    # Phase 4 — Songs
     print("\n" + "=" * 60)
-    print("Phase 4: Songs")
+    print("Phase 4: Song posts (t2l_song)")
     print("=" * 60)
-    import_songs(songs, movie_slug_to_id, lyricist_slug_to_id, md_name_to_tt_id)
+    import_songs(songs, term_maps)
 
     print("\n" + "=" * 60)
-    print("DONE! Check your WordPress admin to verify the import.")
+    print("DONE! Go to wp-admin to verify the import.")
+    print("  Songs:   /wp-admin/edit.php?post_type=t2l_song")
+    print("  Movies:  /wp-admin/edit.php?post_type=t2l_movie_post")
+    print("  People:  /wp-admin/edit.php?post_type=t2l_person_post")
     print("=" * 60)
 
 
