@@ -59,6 +59,83 @@ USER_AGENT = (
 _write_lock = threading.Lock()
 
 # ---------------------------------------------------------------------------
+# Scraper progress tracking (writes output/scraper_progress.json)
+# ---------------------------------------------------------------------------
+
+SCRAPER_PROGRESS_FILE = OUTPUT_DIR / "scraper_progress.json"
+_sp_lock = threading.Lock()
+
+_scraper_progress: dict = {
+    "status":        "starting",
+    "current_phase": "",
+    "started_at":    "",
+    "updated_at":    "",
+    "phases": {
+        "Sitemaps":       {"label": "Fetch Sitemaps",       "done": 0, "total": 5,  "status": "pending"},
+        "Songs":          {"label": "Song Pages",           "done": 0, "total": 0,  "status": "pending"},
+        "Movies":         {"label": "Movie Pages",          "done": 0, "total": 0,  "status": "pending"},
+        "Lyricists":      {"label": "Lyricist Pages",       "done": 0, "total": 0,  "status": "pending"},
+        "MusicDirectors": {"label": "Music Director Pages", "done": 0, "total": 0,  "status": "pending"},
+        "FinalJoin":      {"label": "Final Data Join",      "done": 0, "total": 1,  "status": "pending"},
+    },
+}
+
+# Maps scrape_collection() name → progress phase key
+_PHASE_MAP = {
+    "songs":          "Songs",
+    "movies":         "Movies",
+    "lyricists":      "Lyricists",
+    "music_directors": "MusicDirectors",
+}
+
+
+def _sp_save():
+    from datetime import datetime
+    _scraper_progress["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    try:
+        OUTPUT_DIR.mkdir(exist_ok=True)
+        SCRAPER_PROGRESS_FILE.write_text(
+            json.dumps(_scraper_progress, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def sp_start(phase: str, total: int):
+    from datetime import datetime
+    with _sp_lock:
+        _scraper_progress["status"] = "running"
+        _scraper_progress["current_phase"] = phase
+        if not _scraper_progress["started_at"]:
+            _scraper_progress["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _scraper_progress["phases"][phase]["total"] = total
+        _scraper_progress["phases"][phase]["done"] = 0
+        _scraper_progress["phases"][phase]["status"] = "running"
+        _sp_save()
+
+
+def sp_update(phase: str, done: int):
+    with _sp_lock:
+        _scraper_progress["phases"][phase]["done"] = done
+        _sp_save()
+
+
+def sp_done(phase: str):
+    with _sp_lock:
+        p = _scraper_progress["phases"][phase]
+        p["done"] = p["total"]
+        p["status"] = "done"
+        _sp_save()
+
+
+def sp_finish():
+    with _sp_lock:
+        _scraper_progress["status"] = "done"
+        _scraper_progress["current_phase"] = ""
+        _sp_save()
+
+# ---------------------------------------------------------------------------
 # HTTP via curl
 # ---------------------------------------------------------------------------
 
@@ -124,11 +201,13 @@ def fetch_sitemap_urls(sitemap_url: str) -> list[str]:
 
 def collect_all_seed_urls() -> tuple[list[str], list[str], list[str], list[str]]:
     """Fetch all sitemaps and return (song_urls, movie_urls, lyricist_urls, music_dir_urls)."""
+    sp_start("Sitemaps", 5)
     song_urls = []
-    for sm_url in LYRICS_SITEMAPS:
+    for i, sm_url in enumerate(LYRICS_SITEMAPS):
         urls = fetch_sitemap_urls(sm_url)
         song_urls.extend(urls)
         print(f"    → {len(urls)} URLs")
+        sp_update("Sitemaps", i + 1)
 
     movie_urls = fetch_sitemap_urls(ALBUM_SITEMAP)
     print(f"    → {len(movie_urls)} movie URLs")
@@ -138,6 +217,7 @@ def collect_all_seed_urls() -> tuple[list[str], list[str], list[str], list[str]]
 
     music_dir_urls = fetch_sitemap_urls(MUSIC_DIR_SITEMAP)
     print(f"    → {len(music_dir_urls)} music director URLs")
+    sp_done("Sitemaps")
 
     return song_urls, movie_urls, lyricist_urls, music_dir_urls
 
@@ -461,8 +541,16 @@ def scrape_collection(
 
     print(f"\n{name.title()}: {len(done)} already done, {len(remaining)} remaining")
 
+    # Progress tracking
+    phase_key = _PHASE_MAP.get(name)
+    if phase_key:
+        sp_start(phase_key, len(urls))
+        sp_update(phase_key, len(done))
+
     if not remaining:
         print(f"  Nothing to do!")
+        if phase_key:
+            sp_done(phase_key)
         return
 
     pbar = tqdm(total=len(urls), initial=len(done), desc=name.title(), unit="page")
@@ -488,15 +576,21 @@ def scrape_collection(
             if checkpoint_counter % CHECKPOINT_EVERY == 0:
                 save_checkpoint(name, done)
                 tqdm.write(f"  [checkpoint] {len(done)} {name} saved")
+                if phase_key:
+                    sp_update(phase_key, len(done))
 
     save_checkpoint(name, done)
     pbar.close()
+    if phase_key:
+        sp_done(phase_key)
     print(f"{name.title()} complete: {len(done)} total")
 
 
 def build_final_songs():
     """
     Join all scraped data into one fully connected songs_final.jsonl.
+    """
+    sp_start("FinalJoin", 1)
 
     Each song record embeds:
       - movie: { name, year, slug }
@@ -582,6 +676,7 @@ def build_final_songs():
             fout.write(json.dumps(record, ensure_ascii=False) + "\n")
             joined += 1
 
+    sp_done("FinalJoin")
     print(f"Final join: {joined} songs written to {out_file.name}")
 
 
@@ -651,6 +746,7 @@ def main():
         print(f"  {name}: {count}")
     print(f"Output: {OUTPUT_DIR.resolve()}/")
     print("=" * 60)
+    sp_finish()
 
 
 if __name__ == "__main__":

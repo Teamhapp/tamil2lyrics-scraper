@@ -88,20 +88,29 @@ def progress_finish():
         _save_progress()
 
 # ===========================================================================
-# CONFIG — edit DB credentials only, everything else matches the theme
+# CONFIG — loaded from output/config.json (set via dashboard) or defaults below
 # ===========================================================================
 
+# Load config.json written by the dashboard
+_CONFIG_FILE = Path("output/config.json")
+_cfg: dict = {}
+if _CONFIG_FILE.exists():
+    try:
+        _cfg = json.loads(_CONFIG_FILE.read_text(encoding="utf-8"))
+    except Exception:
+        pass
+
 DB = {
-    "host":     "localhost",
-    "port":     3306,
-    "user":     "root",
-    "password": "your_password",    # ← change
-    "database": "your_wp_db",       # ← change
-    "prefix":   "wp_",              # ← change if different
+    "host":     _cfg.get("host",     "localhost"),
+    "port":     int(_cfg.get("port", 3306)),
+    "user":     _cfg.get("user",     "root"),
+    "password": _cfg.get("password", ""),
+    "database": _cfg.get("database", ""),
+    "prefix":   _cfg.get("prefix",   "wp_"),
     "charset":  "utf8mb4",
 }
 
-AUTHOR_ID   = 1           # WordPress user ID to own imported posts
+AUTHOR_ID   = int(_cfg.get("author_id", 1))
 POST_STATUS = "publish"
 
 # Input files
@@ -663,8 +672,8 @@ def main():
     print("Tamil2Lyrics Theme Importer")
     print("=" * 60)
 
-    if DB["password"] == "your_password" or DB["database"] == "your_wp_db":
-        print("ERROR: Set your DB credentials at the top of this file.")
+    if not DB.get("password") or not DB.get("database"):
+        print("ERROR: Set DB credentials via the dashboard (http://localhost:8080) or output/config.json")
         sys.exit(1)
 
     print("\nLoading scraped data...")

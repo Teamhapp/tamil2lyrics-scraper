@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "Dashboard",
+      "runtimeExecutable": "C:/Users/arika/AppData/Local/Python/bin/python.exe",
+      "runtimeArgs": ["dashboard.py"],
+      "port": 8080
+    }
+  ]
+}

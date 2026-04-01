@@ -1,0 +1,374 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Tamil2Lyrics — Control Panel</title>
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+body{font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;background:#0d0d12;color:#e2e8f0;min-height:100vh;padding:24px}
+h1{font-size:20px;font-weight:700;color:#f1f5f9}
+h2{font-size:14px;font-weight:600;color:#94a3b8;text-transform:uppercase;letter-spacing:.06em;margin-bottom:14px}
+.wrap{max-width:900px;margin:0 auto;display:flex;flex-direction:column;gap:20px}
+
+/* Header */
+.header{display:flex;align-items:center;gap:12px;padding-bottom:4px;border-bottom:1px solid #1e1e2e}
+.header .logo{font-size:28px}
+.header-meta{display:flex;flex-direction:column}
+.header-meta small{color:#475569;font-size:12px;margin-top:2px}
+
+/* Cards */
+.card{background:#13131c;border:1px solid #1e1e2e;border-radius:14px;padding:22px 24px}
+
+/* Config */
+.config-toggle{display:flex;align-items:center;justify-content:space-between;cursor:pointer;user-select:none}
+.config-toggle svg{transition:transform .25s}
+.config-toggle.open svg{transform:rotate(180deg)}
+.config-body{display:none;padding-top:18px}
+.config-body.show{display:block}
+.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px;margin-bottom:16px}
+.field label{display:block;font-size:12px;color:#64748b;margin-bottom:5px}
+.field input{width:100%;background:#0d0d12;border:1px solid #2a2a3a;border-radius:8px;padding:8px 12px;color:#e2e8f0;font-size:13px;outline:none}
+.field input:focus{border-color:#3b82f6}
+.config-actions{display:flex;gap:10px;align-items:center}
+.cfg-msg{font-size:12px;color:#4ade80}
+.cfg-msg.err{color:#f87171}
+
+/* Controls */
+.controls{display:grid;grid-template-columns:1fr 1fr;gap:16px}
+.proc-card{background:#0d0d12;border:1px solid #1e1e2e;border-radius:12px;padding:18px}
+.proc-header{display:flex;align-items:center;justify-content:space-between;margin-bottom:14px}
+.proc-name{font-size:15px;font-weight:600;display:flex;align-items:center;gap:8px}
+.proc-icon{font-size:18px}
+.badge{display:inline-flex;align-items:center;gap:5px;padding:3px 10px;border-radius:999px;font-size:11px;font-weight:600;text-transform:uppercase;letter-spacing:.05em}
+.badge.stopped{background:#1e293b;color:#64748b}
+.badge.running{background:#1e3a5f;color:#60a5fa}
+.badge.done{background:#14532d;color:#4ade80}
+.dot{width:6px;height:6px;border-radius:50%;background:currentColor}
+.dot.pulse{animation:pulse 1.2s ease-in-out infinite}
+@keyframes pulse{0%,100%{opacity:1}50%{opacity:.3}}
+.proc-pid{font-size:11px;color:#334155;margin-bottom:12px}
+.btn-row{display:flex;gap:8px;flex-wrap:wrap}
+button{border:none;border-radius:8px;padding:8px 16px;font-size:13px;font-weight:600;cursor:pointer;transition:opacity .15s}
+button:hover{opacity:.85}
+.btn-start{background:#1d4ed8;color:#fff}
+.btn-stop{background:#7f1d1d;color:#fca5a5}
+.btn-logs{background:#1e293b;color:#94a3b8}
+.btn-save{background:#166534;color:#86efac}
+.btn-load{background:#1e293b;color:#94a3b8}
+.log-box{margin-top:12px;display:none;background:#080810;border:1px solid #1e1e2e;border-radius:8px;padding:12px;font-family:monospace;font-size:11px;color:#64748b;max-height:200px;overflow-y:auto;white-space:pre-wrap;word-break:break-all}
+.log-box.show{display:block}
+
+/* Progress */
+.progress-wrap{display:flex;flex-direction:column;gap:20px}
+.prog-section{background:#0d0d12;border:1px solid #1e1e2e;border-radius:12px;padding:20px}
+.prog-section h3{font-size:14px;font-weight:600;color:#94a3b8;margin-bottom:16px;display:flex;align-items:center;gap:8px}
+.overall{margin-bottom:16px}
+.overall-label{display:flex;justify-content:space-between;font-size:12px;color:#94a3b8;margin-bottom:6px}
+.overall-label strong{color:#e2e8f0}
+.bar-track{height:10px;background:#1e1e2e;border-radius:999px;overflow:hidden}
+.bar-fill{height:100%;border-radius:999px;transition:width .5s ease;background:linear-gradient(90deg,#6366f1,#a78bfa)}
+.bar-fill.done{background:linear-gradient(90deg,#22c55e,#4ade80)}
+.phases{display:flex;flex-direction:column;gap:10px}
+.phase{background:#13131c;border:1px solid #252535;border-radius:10px;padding:14px 16px}
+.phase.active{border-color:#3b82f6}
+.phase.done{border-color:#22c55e33}
+.phase.pending{opacity:.45}
+.phase-hdr{display:flex;justify-content:space-between;align-items:center;margin-bottom:8px}
+.phase-name{font-size:13px;font-weight:600;display:flex;align-items:center;gap:6px}
+.phase-icon{font-size:15px}
+.phase-count{font-size:12px;color:#475569}
+.bar-track.sm{height:7px}
+.pct{font-size:11px;color:#475569;text-align:right;margin-top:4px}
+.refresh-footer{text-align:center;font-size:11px;color:#1e293b;margin-top:4px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <!-- Header -->
+  <div class="header card">
+    <div class="logo">🎵</div>
+    <div class="header-meta">
+      <h1>Tamil2Lyrics Control Panel</h1>
+      <small>Scraper · Importer · Live Progress</small>
+    </div>
+  </div>
+
+  <!-- DB Config -->
+  <div class="card" id="cfg-card">
+    <div class="config-toggle" id="cfg-toggle">
+      <h2 style="margin:0">⚙️ &nbsp;Database Config</h2>
+      <svg width="16" height="16" viewBox="0 0 16 16" fill="#64748b"><path d="M4 6l4 4 4-4"/></svg>
+    </div>
+    <div class="config-body" id="cfg-body">
+      <div class="fields">
+        <div class="field"><label>Host</label><input id="cfg-host" value="localhost"></div>
+        <div class="field"><label>Port</label><input id="cfg-port" type="number" value="3306"></div>
+        <div class="field"><label>User</label><input id="cfg-user" value="root"></div>
+        <div class="field"><label>Password</label><input id="cfg-pass" type="password" placeholder="Enter password"></div>
+        <div class="field"><label>Database</label><input id="cfg-db" placeholder="wordpress_db"></div>
+        <div class="field"><label>Table Prefix</label><input id="cfg-prefix" value="wp_"></div>
+        <div class="field"><label>Author ID</label><input id="cfg-author" type="number" value="1"></div>
+      </div>
+      <div class="config-actions">
+        <button class="btn-load" onclick="loadConfig()">Load Saved</button>
+        <button class="btn-save" onclick="saveConfig()">Save Config</button>
+        <span class="cfg-msg" id="cfg-msg"></span>
+      </div>
+    </div>
+  </div>
+
+  <!-- Process Controls -->
+  <div class="card">
+    <h2>Process Controls</h2>
+    <div class="controls">
+
+      <!-- Scraper -->
+      <div class="proc-card">
+        <div class="proc-header">
+          <div class="proc-name"><span class="proc-icon">🕷️</span> Scraper</div>
+          <div class="badge stopped" id="scraper-badge"><div class="dot"></div><span>Stopped</span></div>
+        </div>
+        <div class="proc-pid" id="scraper-pid">PID: —</div>
+        <div class="btn-row">
+          <button class="btn-start" onclick="startProc('scraper')">▶ Start</button>
+          <button class="btn-stop"  onclick="stopProc('scraper')">■ Stop</button>
+          <button class="btn-logs"  onclick="toggleLogs('scraper')">📋 Logs</button>
+        </div>
+        <div class="log-box" id="scraper-logs"></div>
+      </div>
+
+      <!-- Importer -->
+      <div class="proc-card">
+        <div class="proc-header">
+          <div class="proc-name"><span class="proc-icon">📥</span> Importer</div>
+          <div class="badge stopped" id="importer-badge"><div class="dot"></div><span>Stopped</span></div>
+        </div>
+        <div class="proc-pid" id="importer-pid">PID: —</div>
+        <div class="btn-row">
+          <button class="btn-start" onclick="startProc('importer')">▶ Start</button>
+          <button class="btn-stop"  onclick="stopProc('importer')">■ Stop</button>
+          <button class="btn-logs"  onclick="toggleLogs('importer')">📋 Logs</button>
+        </div>
+        <div class="log-box" id="importer-logs"></div>
+      </div>
+
+    </div>
+  </div>
+
+  <!-- Progress -->
+  <div class="card">
+    <h2>Live Progress</h2>
+    <div class="progress-wrap">
+
+      <!-- Scraper progress -->
+      <div class="prog-section">
+        <h3>🕷️ Scraper</h3>
+        <div class="overall">
+          <div class="overall-label"><span>Overall</span><strong id="scraper-overall-pct">0%</strong></div>
+          <div class="bar-track"><div class="bar-fill" id="scraper-overall-bar" style="width:0%"></div></div>
+        </div>
+        <div class="phases" id="scraper-phases">
+          <!-- rendered by JS -->
+        </div>
+      </div>
+
+      <!-- Importer progress -->
+      <div class="prog-section">
+        <h3>📥 Importer</h3>
+        <div class="overall">
+          <div class="overall-label"><span>Overall</span><strong id="importer-overall-pct">0%</strong></div>
+          <div class="bar-track"><div class="bar-fill" id="importer-overall-bar" style="width:0%"></div></div>
+        </div>
+        <div class="phases" id="importer-phases">
+          <!-- rendered by JS -->
+        </div>
+      </div>
+
+    </div>
+    <div class="refresh-footer" id="refresh-footer">Refreshing in 2s…</div>
+  </div>
+
+</div><!-- /wrap -->
+
+<script>
+// Phase icons
+const ICONS = {
+  Sitemaps:'🗺️', Songs:'🎵', Movies:'🎬', Lyricists:'✍️',
+  MusicDirectors:'🎹', FinalJoin:'🔗',
+  Terms:'🏷️', People:'👤',
+};
+
+// Log visibility state
+const _logsOpen = {scraper: false, importer: false};
+
+// ── Config ─────────────────────────────────────────────────────────────────
+document.getElementById('cfg-toggle').addEventListener('click', () => {
+  const toggle = document.getElementById('cfg-toggle');
+  const body   = document.getElementById('cfg-body');
+  toggle.classList.toggle('open');
+  body.classList.toggle('show');
+});
+
+async function loadConfig() {
+  try {
+    const r = await fetch('/api/config');
+    const cfg = await r.json();
+    if (cfg.host)     document.getElementById('cfg-host').value   = cfg.host;
+    if (cfg.port)     document.getElementById('cfg-port').value   = cfg.port;
+    if (cfg.user)     document.getElementById('cfg-user').value   = cfg.user;
+    if (cfg.database) document.getElementById('cfg-db').value     = cfg.database;
+    if (cfg.prefix)   document.getElementById('cfg-prefix').value = cfg.prefix;
+    if (cfg.author_id)document.getElementById('cfg-author').value = cfg.author_id;
+    showMsg('Loaded', false);
+  } catch(e) { showMsg('Load failed', true); }
+}
+
+async function saveConfig() {
+  const body = {
+    host:      document.getElementById('cfg-host').value.trim(),
+    port:      parseInt(document.getElementById('cfg-port').value) || 3306,
+    user:      document.getElementById('cfg-user').value.trim(),
+    password:  document.getElementById('cfg-pass').value,
+    database:  document.getElementById('cfg-db').value.trim(),
+    prefix:    document.getElementById('cfg-prefix').value.trim() || 'wp_',
+    author_id: parseInt(document.getElementById('cfg-author').value) || 1,
+  };
+  if (!body.database) { showMsg('Database name required', true); return; }
+  try {
+    const r = await fetch('/api/config/save', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+    const j = await r.json();
+    showMsg(j.ok ? '✓ Saved' : (j.error || 'Error'), !j.ok);
+  } catch(e) { showMsg('Save failed', true); }
+}
+
+function showMsg(text, isErr) {
+  const el = document.getElementById('cfg-msg');
+  el.textContent = text;
+  el.className = 'cfg-msg' + (isErr ? ' err' : '');
+  setTimeout(() => el.textContent = '', 3000);
+}
+
+// ── Process control ────────────────────────────────────────────────────────
+async function startProc(name) {
+  const r = await fetch(`/api/${name}/start`, { method:'POST' });
+  const j = await r.json();
+  if (!r.ok) alert(j.error || 'Failed to start');
+}
+
+async function stopProc(name) {
+  await fetch(`/api/${name}/stop`, { method:'POST' });
+}
+
+async function toggleLogs(name) {
+  _logsOpen[name] = !_logsOpen[name];
+  const box = document.getElementById(`${name}-logs`);
+  box.classList.toggle('show', _logsOpen[name]);
+  if (_logsOpen[name]) await refreshLogs(name);
+}
+
+async function refreshLogs(name) {
+  if (!_logsOpen[name]) return;
+  try {
+    const r = await fetch(`/api/logs/${name}?lines=80`);
+    const j = await r.json();
+    const box = document.getElementById(`${name}-logs`);
+    box.textContent = (j.lines || []).join('\n');
+    box.scrollTop = box.scrollHeight;
+  } catch(e) {}
+}
+
+// ── Progress rendering ─────────────────────────────────────────────────────
+function pct(done, total) {
+  if (!total) return 0;
+  return Math.min(100, Math.round(done / total * 100));
+}
+
+function fmt(n) { return (n||0).toLocaleString(); }
+
+function renderPhases(containerId, phases, overallBarId, overallPctId) {
+  if (!phases) return;
+  const container = document.getElementById(containerId);
+  const keys = Object.keys(phases);
+
+  let totalDone = 0, totalTotal = 0;
+  keys.forEach(k => {
+    totalDone  += phases[k].done  || 0;
+    totalTotal += phases[k].total || 0;
+  });
+
+  const overallPct = pct(totalDone, totalTotal);
+  const allDone = keys.every(k => phases[k].status === 'done');
+  document.getElementById(overallBarId).style.width = overallPct + '%';
+  document.getElementById(overallBarId).className = 'bar-fill' + (allDone ? ' done' : '');
+  document.getElementById(overallPctId).textContent = overallPct + '%';
+
+  container.innerHTML = keys.map(key => {
+    const p = phases[key];
+    const done   = p.done  || 0;
+    const total  = p.total || 0;
+    const status = p.status || 'pending';
+    const pctVal = pct(done, total);
+    const icon   = ICONS[key] || '📄';
+    const label  = p.label || key;
+    const cls    = status === 'done' ? 'done' : status === 'running' ? 'active' : 'pending';
+    const barCls = status === 'done' ? 'bar-fill done' : 'bar-fill';
+    return `
+      <div class="phase ${cls}">
+        <div class="phase-hdr">
+          <div class="phase-name"><span class="phase-icon">${icon}</span>${label}</div>
+          <div class="phase-count">${fmt(done)} / ${fmt(total)}</div>
+        </div>
+        <div class="bar-track sm"><div class="${barCls}" style="width:${pctVal}%"></div></div>
+        <div class="pct">${pctVal}%</div>
+      </div>`;
+  }).join('');
+}
+
+function updateBadge(name, running) {
+  const badge = document.getElementById(`${name}-badge`);
+  badge.className = 'badge ' + (running ? 'running' : 'stopped');
+  badge.innerHTML = `<div class="dot${running ? ' pulse' : ''}"></div><span>${running ? 'Running' : 'Stopped'}</span>`;
+}
+
+// ── Polling ────────────────────────────────────────────────────────────────
+let countdown = 2;
+
+async function refresh() {
+  try {
+    const r = await fetch('/api/status');
+    const data = await r.json();
+
+    for (const name of ['scraper', 'importer']) {
+      const info = data[name] || {};
+      updateBadge(name, info.running);
+      document.getElementById(`${name}-pid`).textContent = info.pid ? `PID: ${info.pid}` : 'PID: —';
+      await refreshLogs(name);
+    }
+
+    const sp = data.scraper?.progress;
+    if (sp?.phases) renderPhases('scraper-phases', sp.phases, 'scraper-overall-bar', 'scraper-overall-pct');
+
+    const ip = data.importer?.progress;
+    if (ip?.phases) renderPhases('importer-phases', ip.phases, 'importer-overall-bar', 'importer-overall-pct');
+
+  } catch(e) {
+    console.warn('Status fetch failed:', e);
+  }
+}
+
+setInterval(() => {
+  countdown--;
+  document.getElementById('refresh-footer').textContent = `Refreshing in ${countdown}s…`;
+  if (countdown <= 0) {
+    countdown = 2;
+    refresh();
+  }
+}, 1000);
+
+refresh(); // immediate on load
+loadConfig(); // pre-fill config form
+</script>
+</body>
+</html>
