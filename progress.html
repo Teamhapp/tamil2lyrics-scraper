@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Tamil2Lyrics Import Progress</title>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: #0f0f13;
+      color: #e2e8f0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 24px;
+    }
+
+    .card {
+      background: #1a1a24;
+      border: 1px solid #2d2d3d;
+      border-radius: 16px;
+      padding: 36px;
+      width: 100%;
+      max-width: 680px;
+      box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+    }
+
+    .header {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+      margin-bottom: 32px;
+    }
+
+    .logo {
+      font-size: 32px;
+    }
+
+    .header-text h1 {
+      font-size: 22px;
+      font-weight: 700;
+      color: #f1f5f9;
+    }
+
+    .header-text p {
+      font-size: 13px;
+      color: #64748b;
+      margin-top: 2px;
+    }
+
+    .status-badge {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 4px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.05em;
+      margin-left: auto;
+    }
+
+    .status-badge.starting  { background: #1e293b; color: #94a3b8; }
+    .status-badge.running   { background: #1e3a5f; color: #60a5fa; }
+    .status-badge.done      { background: #14532d; color: #4ade80; }
+    .status-badge.error     { background: #450a0a; color: #f87171; }
+    .status-badge.waiting   { background: #1e293b; color: #64748b; }
+
+    .dot {
+      width: 7px;
+      height: 7px;
+      border-radius: 50%;
+      background: currentColor;
+    }
+
+    .dot.pulse {
+      animation: pulse 1.2s ease-in-out infinite;
+    }
+
+    @keyframes pulse {
+      0%, 100% { opacity: 1; transform: scale(1); }
+      50%       { opacity: 0.4; transform: scale(0.75); }
+    }
+
+    .phases { display: flex; flex-direction: column; gap: 20px; }
+
+    .phase {
+      background: #12121a;
+      border: 1px solid #252535;
+      border-radius: 12px;
+      padding: 18px 20px;
+      transition: border-color 0.3s;
+    }
+
+    .phase.active  { border-color: #3b82f6; }
+    .phase.done    { border-color: #22c55e44; }
+    .phase.pending { opacity: 0.5; }
+
+    .phase-header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      margin-bottom: 12px;
+    }
+
+    .phase-name {
+      font-size: 15px;
+      font-weight: 600;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .phase-icon { font-size: 18px; }
+
+    .phase-count {
+      font-size: 13px;
+      color: #64748b;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .phase-count span { color: #94a3b8; }
+
+    .bar-track {
+      height: 8px;
+      background: #1e1e2e;
+      border-radius: 999px;
+      overflow: hidden;
+    }
+
+    .bar-fill {
+      height: 100%;
+      border-radius: 999px;
+      transition: width 0.6s ease;
+      background: linear-gradient(90deg, #3b82f6, #818cf8);
+    }
+
+    .bar-fill.done {
+      background: linear-gradient(90deg, #22c55e, #4ade80);
+    }
+
+    .pct {
+      font-size: 12px;
+      color: #64748b;
+      margin-top: 6px;
+      text-align: right;
+      font-variant-numeric: tabular-nums;
+    }
+
+    .footer {
+      margin-top: 28px;
+      padding-top: 20px;
+      border-top: 1px solid #1e1e2e;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      font-size: 12px;
+      color: #475569;
+    }
+
+    .footer .updated { color: #334155; }
+
+    .total-bar {
+      margin-bottom: 28px;
+    }
+
+    .total-bar .label {
+      font-size: 13px;
+      color: #94a3b8;
+      margin-bottom: 8px;
+      display: flex;
+      justify-content: space-between;
+    }
+
+    .total-bar .label strong { color: #e2e8f0; }
+
+    .total-bar .bar-track { height: 12px; }
+
+    .total-bar .bar-fill {
+      background: linear-gradient(90deg, #6366f1, #8b5cf6, #a78bfa);
+    }
+
+    .total-bar .bar-fill.done {
+      background: linear-gradient(90deg, #22c55e, #4ade80);
+    }
+
+    #error-msg {
+      display: none;
+      margin-top: 16px;
+      padding: 12px 16px;
+      background: #450a0a33;
+      border: 1px solid #7f1d1d;
+      border-radius: 8px;
+      font-size: 13px;
+      color: #fca5a5;
+    }
+
+    .checkmark { color: #4ade80; }
+    .spinner   { display: inline-block; animation: spin 1s linear infinite; }
+    @keyframes spin { to { transform: rotate(360deg); } }
+  </style>
+</head>
+<body>
+<div class="card">
+
+  <div class="header">
+    <div class="logo">🎵</div>
+    <div class="header-text">
+      <h1>Tamil2Lyrics Importer</h1>
+      <p>WordPress database import progress</p>
+    </div>
+    <div id="status-badge" class="status-badge waiting">
+      <div class="dot"></div>
+      <span id="status-text">Waiting</span>
+    </div>
+  </div>
+
+  <!-- Overall progress -->
+  <div class="total-bar">
+    <div class="label">
+      <span>Overall Progress</span>
+      <strong id="overall-pct">0%</strong>
+    </div>
+    <div class="bar-track">
+      <div class="bar-fill" id="overall-bar" style="width:0%"></div>
+    </div>
+  </div>
+
+  <!-- Phase bars -->
+  <div class="phases">
+
+    <div class="phase pending" id="phase-Terms">
+      <div class="phase-header">
+        <div class="phase-name">
+          <span class="phase-icon">🏷️</span>
+          Taxonomy Terms
+        </div>
+        <div class="phase-count" id="count-Terms">0 / 0</div>
+      </div>
+      <div class="bar-track"><div class="bar-fill" id="bar-Terms" style="width:0%"></div></div>
+      <div class="pct" id="pct-Terms">0%</div>
+    </div>
+
+    <div class="phase pending" id="phase-Movies">
+      <div class="phase-header">
+        <div class="phase-name">
+          <span class="phase-icon">🎬</span>
+          Movie Posts
+        </div>
+        <div class="phase-count" id="count-Movies">0 / 0</div>
+      </div>
+      <div class="bar-track"><div class="bar-fill" id="bar-Movies" style="width:0%"></div></div>
+      <div class="pct" id="pct-Movies">0%</div>
+    </div>
+
+    <div class="phase pending" id="phase-People">
+      <div class="phase-header">
+        <div class="phase-name">
+          <span class="phase-icon">👤</span>
+          Person Posts
+        </div>
+        <div class="phase-count" id="count-People">0 / 0</div>
+      </div>
+      <div class="bar-track"><div class="bar-fill" id="bar-People" style="width:0%"></div></div>
+      <div class="pct" id="pct-People">0%</div>
+    </div>
+
+    <div class="phase pending" id="phase-Songs">
+      <div class="phase-header">
+        <div class="phase-name">
+          <span class="phase-icon">🎵</span>
+          Song Posts
+        </div>
+        <div class="phase-count" id="count-Songs">0 / 0</div>
+      </div>
+      <div class="bar-track"><div class="bar-fill" id="bar-Songs" style="width:0%"></div></div>
+      <div class="pct" id="pct-Songs">0%</div>
+    </div>
+
+  </div>
+
+  <div id="error-msg"></div>
+
+  <div class="footer">
+    <div>Started: <span id="started-at">—</span></div>
+    <div class="updated">Updated: <span id="updated-at">—</span></div>
+    <div>Refresh: <span id="refresh-countdown">2s</span></div>
+  </div>
+
+</div>
+
+<script>
+  const PHASES = ['Terms', 'Movies', 'People', 'Songs'];
+  let countdown = 2;
+
+  function fmt(n) {
+    return n.toLocaleString();
+  }
+
+  function pct(done, total) {
+    if (!total) return 0;
+    return Math.min(100, Math.round((done / total) * 100));
+  }
+
+  async function refresh() {
+    try {
+      const res = await fetch('output/progress.json?t=' + Date.now());
+      if (!res.ok) throw new Error('progress.json not found — start the importer first');
+      const data = await res.json();
+
+      document.getElementById('error-msg').style.display = 'none';
+
+      // Status badge
+      const badge   = document.getElementById('status-badge');
+      const stText  = document.getElementById('status-text');
+      badge.className = 'status-badge ' + data.status;
+      stText.textContent = data.status.charAt(0).toUpperCase() + data.status.slice(1);
+      badge.querySelector('.dot').className = 'dot' + (data.status === 'running' ? ' pulse' : '');
+
+      // Timestamps
+      document.getElementById('started-at').textContent = data.started_at || '—';
+      document.getElementById('updated-at').textContent = data.updated_at || '—';
+
+      // Phase bars
+      let totalDone = 0, totalTotal = 0;
+
+      PHASES.forEach(key => {
+        const p = data.phases[key];
+        if (!p) return;
+
+        const done  = p.done  || 0;
+        const total = p.total || 0;
+        const pctVal = pct(done, total);
+        const status = p.status || 'pending';
+
+        totalDone  += done;
+        totalTotal += total;
+
+        const phaseEl = document.getElementById('phase-' + key);
+        phaseEl.className = 'phase ' + (status === 'done' ? 'done' : status === 'running' ? 'active' : 'pending');
+
+        document.getElementById('count-' + key).innerHTML =
+          `<span>${fmt(done)}</span> / ${fmt(total)}`;
+
+        const bar = document.getElementById('bar-' + key);
+        bar.style.width = pctVal + '%';
+        bar.className   = 'bar-fill' + (status === 'done' ? ' done' : '');
+
+        document.getElementById('pct-' + key).textContent = pctVal + '%';
+      });
+
+      // Overall bar
+      const overallPct = pct(totalDone, totalTotal);
+      const overallBar = document.getElementById('overall-bar');
+      overallBar.style.width = overallPct + '%';
+      overallBar.className   = 'bar-fill' + (data.status === 'done' ? ' done' : '');
+      document.getElementById('overall-pct').textContent = overallPct + '%';
+
+    } catch (err) {
+      document.getElementById('error-msg').style.display = 'block';
+      document.getElementById('error-msg').textContent   = '⚠ ' + err.message;
+    }
+  }
+
+  // Countdown ticker
+  setInterval(() => {
+    countdown--;
+    document.getElementById('refresh-countdown').textContent = countdown + 's';
+    if (countdown <= 0) {
+      countdown = 2;
+      refresh();
+    }
+  }, 1000);
+
+  refresh(); // immediate first load
+</script>
+</body>
+</html>

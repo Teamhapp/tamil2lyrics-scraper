@@ -19,11 +19,73 @@ Import order:
 import json
 import re
 import sys
+import threading
 from datetime import datetime
 from pathlib import Path
 
 import pymysql
 from tqdm import tqdm
+
+# ===========================================================================
+# Progress tracking — writes output/progress.json every update
+# Open progress.html in a browser while the import runs
+# ===========================================================================
+
+PROGRESS_FILE = Path("output/progress.json")
+_progress_lock = threading.Lock()
+
+_progress: dict = {
+    "status":     "starting",
+    "current_phase": "",
+    "started_at": "",
+    "updated_at": "",
+    "phases": {
+        "Terms":   {"label": "Taxonomy Terms",  "done": 0, "total": 0, "status": "pending"},
+        "Movies":  {"label": "Movie Posts",     "done": 0, "total": 0, "status": "pending"},
+        "People":  {"label": "Person Posts",    "done": 0, "total": 0, "status": "pending"},
+        "Songs":   {"label": "Song Posts",      "done": 0, "total": 0, "status": "pending"},
+    },
+}
+
+
+def _save_progress():
+    _progress["updated_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    PROGRESS_FILE.parent.mkdir(exist_ok=True)
+    with open(PROGRESS_FILE, "w", encoding="utf-8") as f:
+        json.dump(_progress, f, ensure_ascii=False, indent=2)
+
+
+def progress_start(phase: str, total: int):
+    with _progress_lock:
+        _progress["status"] = "running"
+        _progress["current_phase"] = phase
+        if not _progress["started_at"]:
+            _progress["started_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        _progress["phases"][phase]["total"] = total
+        _progress["phases"][phase]["done"] = 0
+        _progress["phases"][phase]["status"] = "running"
+        _save_progress()
+
+
+def progress_update(phase: str, done: int):
+    with _progress_lock:
+        _progress["phases"][phase]["done"] = done
+        _save_progress()
+
+
+def progress_done(phase: str):
+    with _progress_lock:
+        p = _progress["phases"][phase]
+        p["done"] = p["total"]
+        p["status"] = "done"
+        _save_progress()
+
+
+def progress_finish():
+    with _progress_lock:
+        _progress["status"] = "done"
+        _progress["current_phase"] = ""
+        _save_progress()
 
 # ===========================================================================
 # CONFIG — edit DB credentials only, everything else matches the theme
@@ -240,6 +302,10 @@ def import_all_terms(songs: list[dict], movies: list[dict], music_dirs: list[dic
     cur = conn.cursor()
     result = {t: {} for t in ["t2l_movie", "t2l_director", "t2l_singer", "t2l_lyricist", "t2l_decade"]}
 
+    all_terms_total = sum([len(movie_terms), len(director_terms), len(singer_terms), len(lyricist_terms), len(decade_terms)])
+    progress_start("Terms", all_terms_total)
+    done_so_far = 0
+
     try:
         for taxonomy, terms in [
             ("t2l_movie",    movie_terms),
@@ -250,12 +316,17 @@ def import_all_terms(songs: list[dict], movies: list[dict], music_dirs: list[dic
             for slug, name in tqdm(terms.items(), desc=taxonomy, unit="term"):
                 tt_id = get_or_create_term(cur, name, slug, taxonomy)
                 result[taxonomy][slug] = tt_id
+                done_so_far += 1
+                if done_so_far % 50 == 0:
+                    progress_update("Terms", done_so_far)
 
         for decade in tqdm(decade_terms, desc="t2l_decade", unit="term"):
             tt_id = get_or_create_term(cur, decade, slugify(decade), "t2l_decade")
             result["t2l_decade"][decade] = tt_id
+            done_so_far += 1
 
         conn.commit()
+        progress_done("Terms")
     except Exception as e:
         conn.rollback()
         print(f"  ERROR: {e}")
@@ -276,6 +347,7 @@ def import_all_terms(songs: list[dict], movies: list[dict], music_dirs: list[dic
 def import_movie_posts(movies: list[dict], movie_tt_ids: dict) -> dict[str, int]:
     """Returns { movie_slug: post_id }"""
     print(f"\nMovies: {len(movies)}")
+    progress_start("Movies", len(movies))
     conn = get_conn()
     cur = conn.cursor()
     slug_to_id: dict[str, int] = {}
@@ -283,7 +355,7 @@ def import_movie_posts(movies: list[dict], movie_tt_ids: dict) -> dict[str, int]
     meta_rows: list[tuple] = []
 
     try:
-        for m in tqdm(movies, desc="Movie posts", unit="post"):
+        for idx, m in enumerate(tqdm(movies, desc="Movie posts", unit="post")):
             slug       = m.get("movie_slug", "").strip()
             name       = m.get("name", "").strip() or slug
             year       = m.get("year", "")
@@ -313,6 +385,7 @@ def import_movie_posts(movies: list[dict], movie_tt_ids: dict) -> dict[str, int]
                 )
                 meta_rows.clear()
                 conn.commit()
+                progress_update("Movies", idx + 1)
 
         if meta_rows:
             cur.executemany(
@@ -320,6 +393,7 @@ def import_movie_posts(movies: list[dict], movie_tt_ids: dict) -> dict[str, int]
                 meta_rows,
             )
         conn.commit()
+        progress_done("Movies")
         print(f"  → {new_count} new, {skipped} skipped")
     except Exception as e:
         conn.rollback()
@@ -380,6 +454,7 @@ def import_person_posts(
             p["singer_slug"] = s_slug
 
     print(f"\nPeople: {len(people)} unique persons")
+    progress_start("People", len(people))
 
     conn = get_conn()
     cur = conn.cursor()
@@ -388,7 +463,7 @@ def import_person_posts(
     meta_rows: list[tuple] = []
 
     try:
-        for slug, info in tqdm(people.items(), desc="Person posts", unit="post"):
+        for idx, (slug, info) in enumerate(tqdm(people.items(), desc="Person posts", unit="post")):
             name  = info["name"]
             roles = info["roles"]
 
@@ -433,6 +508,7 @@ def import_person_posts(
                 )
                 meta_rows.clear()
                 conn.commit()
+                progress_update("People", idx + 1)
 
         if meta_rows:
             cur.executemany(
@@ -440,6 +516,7 @@ def import_person_posts(
                 meta_rows,
             )
         conn.commit()
+        progress_done("People")
         print(f"  → {new_count} new, {skipped} skipped")
     except Exception as e:
         conn.rollback()
@@ -458,6 +535,7 @@ def import_person_posts(
 
 def import_songs(songs: list[dict], term_maps: dict):
     print(f"\nSongs: {len(songs)}")
+    progress_start("Songs", len(songs))
     conn = get_conn()
     cur = conn.cursor()
     new_count = skipped = 0
@@ -465,7 +543,7 @@ def import_songs(songs: list[dict], term_maps: dict):
     term_rel_rows: list[tuple] = []
 
     try:
-        for song in tqdm(songs, desc="Songs", unit="post"):
+        for idx, song in enumerate(tqdm(songs, desc="Songs", unit="post")):
             slug      = song.get("slug", "").strip()
             title     = song.get("title_en", "").strip() or slug
             lyrics_en = song.get("lyrics_en", "")
@@ -537,6 +615,7 @@ def import_songs(songs: list[dict], term_maps: dict):
                     )
                     term_rel_rows.clear()
                 conn.commit()
+                progress_update("Songs", idx + 1)
 
         # Final flush
         if meta_rows:
@@ -564,6 +643,7 @@ def import_songs(songs: list[dict], term_maps: dict):
             )
         conn.commit()
 
+        progress_done("Songs")
         print(f"  → {new_count} new, {skipped} skipped")
     except Exception as e:
         conn.rollback()
@@ -639,6 +719,7 @@ def main():
     print("  Movies:  /wp-admin/edit.php?post_type=t2l_movie_post")
     print("  People:  /wp-admin/edit.php?post_type=t2l_person_post")
     print("=" * 60)
+    progress_finish()
 
 
 if __name__ == "__main__":
